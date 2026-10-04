@@ -1,6 +1,7 @@
 FROM caddy:builder AS builder
 RUN xcaddy build \
-    --with github.com/porech/caddy-maxmind-geolocation
+    --with github.com/porech/caddy-maxmind-geolocation \
+    --with github.com/caddy-dns/desec
 
 FROM caddy:latest
 LABEL org.opencontainers.image.source="https://github.com/christiantannheimer/caddy-geoblock"
