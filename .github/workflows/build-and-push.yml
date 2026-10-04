@@ -1,4 +1,4 @@
-name: Build and Push Caddy with MaxMind GeoIP
+name: Build and Push Caddy with MaxMind GeoIP and deSEC
 
 on:
   schedule:
@@ -41,15 +41,21 @@ jobs:
           MM_LATEST=$(curl -sL -H "$AUTH" \
             "https://api.github.com/repos/porech/caddy-maxmind-geolocation/commits" \
             | jq -r '.[0].sha' | cut -c1-7)
+          DS_LATEST=$(curl -sL -H "$AUTH" \
+            "https://api.github.com/repos/caddy-dns/desec/commits" \
+            | jq -r '.[0].sha' | cut -c1-7)
+          # Änderungen am Dockerfile selbst erzwingen ebenfalls einen Neubau
+          DF_HASH=$(sha256sum Dockerfile | cut -c1-7)
 
           # Sanity-Check: leere Werte deuten auf Rate-Limit hin
-          if [ -z "$CADDY_LATEST" ] || [ "$CADDY_LATEST" = "null" ] \
-             || [ -z "$MM_LATEST" ] || [ "$MM_LATEST" = "null" ]; then
-            echo "API-Abfrage fehlgeschlagen (Rate-Limit?). Abbruch."
-            exit 1
-          fi
+          for v in "$CADDY_LATEST" "$MM_LATEST" "$DS_LATEST"; do
+            if [ -z "$v" ] || [ "$v" = "null" ]; then
+              echo "API-Abfrage fehlgeschlagen (Rate-Limit?). Abbruch."
+              exit 1
+            fi
+          done
 
-          VERSION_TAG="${CADDY_LATEST}-mm-${MM_LATEST}"
+          VERSION_TAG="${CADDY_LATEST}-mm-${MM_LATEST}-ds-${DS_LATEST}-df-${DF_HASH}"
           echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
           echo "Prüfe Version: ${VERSION_TAG}"
 
