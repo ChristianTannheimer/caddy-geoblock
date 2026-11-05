@@ -1,9 +1,29 @@
 name: Build and Push Caddy with MaxMind GeoIP and deSEC
 
+# Neubau bei Änderung an:
+#   - Caddy-Release
+#   - Plugin caddy-maxmind-geolocation oder caddy-dns/desec (neuer Commit)
+#   - Basis-Image der letzten Stufe im Dockerfile (Digest, z. B. Alpine-Fixes)
+#   - Dockerfile selbst
+#
+# CVE-Scan (Grype):
+#   - nach jedem Build
+#   - zusätzlich jeden Montag, auch ohne Build (neue CVEs im alten Image)
+#   - bei jedem manuellen Start
+# Gemeldet wird nur CRITICAL/HIGH, für das es einen Fix gibt. Dann wird der
+# Scan-Job rot und GitHub schickt eine Mail. Das Image wird trotzdem
+# veröffentlicht - ein neueres Image ist fast immer besser als das alte.
+
 on:
   schedule:
     - cron: '37 4 * * *'   # täglich 04:37 UTC, baut aber nur bei Änderungen
+    - cron: '52 5 * * 1'   # montags 05:52 UTC: CVE-Scan auch ohne Build
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Build erzwingen (ignoriert die Änderungsprüfung)"
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -17,6 +37,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      build_needed: ${{ steps.check.outputs.build_needed }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -47,19 +69,30 @@ jobs:
           # Änderungen am Dockerfile selbst erzwingen ebenfalls einen Neubau
           DF_HASH=$(sha256sum Dockerfile | cut -c1-7)
 
-          # Sanity-Check: leere Werte deuten auf Rate-Limit hin
-          for v in "$CADDY_LATEST" "$MM_LATEST" "$DS_LATEST"; do
+          # Basis-Image der letzten Stufe (Laufzeit-Image) aus dem Dockerfile.
+          # Neuer Digest = z. B. Alpine-Sicherheitsfixes -> Neubau.
+          RUNTIME_BASE=$(grep -oP '^FROM \K\S+' Dockerfile | tail -n1)
+          BASE_DIGEST=$(docker buildx imagetools inspect "$RUNTIME_BASE" \
+            --format '{{println .Manifest.Digest}}' | head -n1 \
+            | sed 's/^sha256://' | cut -c1-7)
+          echo "Laufzeit-Basis: ${RUNTIME_BASE} (${BASE_DIGEST})"
+
+          # Sanity-Check: leere Werte deuten auf Rate-Limit oder Lesefehler hin
+          for v in "$CADDY_LATEST" "$MM_LATEST" "$DS_LATEST" "$BASE_DIGEST"; do
             if [ -z "$v" ] || [ "$v" = "null" ]; then
-              echo "API-Abfrage fehlgeschlagen (Rate-Limit?). Abbruch."
+              echo "Abfrage fehlgeschlagen (Rate-Limit oder FROM nicht lesbar). Abbruch."
               exit 1
             fi
           done
 
-          VERSION_TAG="${CADDY_LATEST}-mm-${MM_LATEST}-ds-${DS_LATEST}-df-${DF_HASH}"
+          VERSION_TAG="${CADDY_LATEST}-mm-${MM_LATEST}-ds-${DS_LATEST}-b-${BASE_DIGEST}-df-${DF_HASH}"
           echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
           echo "Prüfe Version: ${VERSION_TAG}"
 
-          if docker manifest inspect \
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "Build manuell erzwungen."
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+          elif docker manifest inspect \
              "ghcr.io/${IMAGE_NAME}:${VERSION_TAG}" > /dev/null 2>&1; then
             echo "Keine Änderungen. Image existiert bereits."
             echo "build_needed=false" >> "$GITHUB_OUTPUT"
@@ -77,9 +110,43 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          pull: true
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.check.outputs.version_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  scan:
+    needs: build-and-push
+    # always(): läuft auch beim Montags-Scan ohne Build.
+    # Ist build-and-push fehlgeschlagen, kommt dafür schon eine eigene Mail.
+    if: >-
+      always() &&
+      needs.build-and-push.result == 'success' &&
+      (needs.build-and-push.outputs.build_needed == 'true' ||
+       github.event.schedule == '52 5 * * 1' ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      # Grype liest die Zugangsdaten aus der Docker-Config,
+      # nötig falls das Package auf ghcr.io privat ist.
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: CVE-Scan (Grype)
+        # Auf Commit gepinnt (v7.4.2), nicht auf den Tag.
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          severity-cutoff: high
+          only-fixed: true
+          fail-build: true
+          output-format: table
