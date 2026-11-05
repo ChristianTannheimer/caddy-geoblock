@@ -6,11 +6,14 @@ FROM caddy:builder AS builder
 # Kann entfernt werden, sobald Caddy mindestens diese Versionen mitbringt.
 #   go-jose/v4 >= 4.1.6   GHSA-mgcc-cww5-fp2q
 #   x/net      >= 0.62.0  GO-2026-6860, GO-2026-6866
+# Hinweis: xcaddy importiert jede --with-Angabe als Paket. golang.org/x/net
+# hat an der Wurzel kein Paket, deshalb ein Unterpaket angeben - die
+# Version gilt fuer das ganze Modul x/net.
 RUN xcaddy build \
     --with github.com/porech/caddy-maxmind-geolocation \
     --with github.com/caddy-dns/desec \
     --with github.com/go-jose/go-jose/v4@v4.1.6 \
-    --with golang.org/x/net@v0.62.0
+    --with golang.org/x/net/http2@v0.62.0
 
 FROM caddy:latest
 LABEL org.opencontainers.image.source="https://github.com/christiantannheimer/caddy-geoblock"
